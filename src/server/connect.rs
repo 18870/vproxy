@@ -676,17 +676,38 @@ fn assign_ipv6_from_extension(
     if let Some(combined) = extract_value_from_extension(extension) {
         match extension {
             Extension::TTL(_) | Extension::Session(_) => {
+                // Use cidr_range if provided, otherwise use network_length
                 let network_length = cidr.network_length();
-                if u32::from(network_length) >= Ipv6Addr::BITS {
+                let effective_length = cidr_range.unwrap_or(network_length);
+                
+                if u32::from(effective_length) >= Ipv6Addr::BITS {
                     return cidr.first_address();
                 }
 
-                // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
-                // the non-variable part
+                // Calculate the subnet mask to preserve the network part
                 let subnet_mask = !((1u128 << (128 - network_length)) - 1);
                 let base_ip_bits = u128::from(cidr.first_address()) & subnet_mask;
-                let capacity = 2u128.pow(128 - network_length as u32) - 1;
-                let ip_num = base_ip_bits | (combined as u128 % capacity);
+                
+                // Expand the 64-bit combined value to fill larger address space
+                // For address spaces larger than 64 bits, we need to expand the hash
+                let bits_needed = 128 - effective_length as u32;
+                let expanded_combined = if bits_needed > 64 {
+                    // Combine original value with a derived value to create 128 bits
+                    let low = combined as u128;
+                    let high = (combined.wrapping_mul(0x9e3779b97f4a7c15)) as u128;
+                    (high << 64) | low
+                } else {
+                    combined as u128
+                };
+                
+                // Calculate the capacity of the variable address space
+                let capacity = if bits_needed < 128 {
+                    (1u128 << bits_needed) - 1
+                } else {
+                    u128::MAX
+                };
+                
+                let ip_num = base_ip_bits | (expanded_combined % capacity);
                 return Ipv6Addr::from(ip_num);
             }
             Extension::Range(_) => {
